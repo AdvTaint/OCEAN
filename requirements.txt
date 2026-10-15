@@ -1,0 +1,8 @@
+# OCEAN Python dependencies (developed/tested on Python 3.12)
+tree-sitter==0.21.3
+langchain>=0.3.27
+langchain-core>=0.3.79
+langchain-community>=0.3.29
+langchain-ollama>=0.3.8
+pydantic>=2.11
+tqdm>=4.67
