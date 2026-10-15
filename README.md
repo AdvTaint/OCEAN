@@ -1,74 +1,94 @@
 # OCEAN: Operation-Centered Evidence Composition for LLM-Based Vulnerability Detection
 
-OCEAN is a two-stage LLM vulnerability detector for C/C++. A tree-sitter
-static backend extracts source-specific propagation evidence and terminal
-sink operations, then composes them into **operation-centered evidence
-contexts (OCEs)** — all sources reaching the same sensitive operation are
-grouped into one analysis task. A high-recall **screening** stage turns each
-OCE into root-cause hypotheses; an **adversarial verification** stage then
-tries to refute every hypothesis against retrieved counter-evidence before
-anything is reported. Output is strictly binary per hypothesis
-(`Vulnerable` / `Not Vulnerable`).
+OCEAN is an LLM-based vulnerability detection framework for C/C++ that combines lightweight static program analysis with operation-centered evidence composition and hypothesis-specific review. Instead of asking an LLM to reconstruct vulnerability-relevant relations from raw source code, OCEAN organizes program evidence around concrete security-sensitive operations and refines that evidence according to each proposed vulnerability mechanism.
 
-## Architecture
+OCEAN has two reasoning stages: **hypothesis generation**, which proposes plausible vulnerabilities from operation-centered evidence, and **hypothesis review**, which examines the supporting conditions and potential defenses using hypothesis-specific evidence. The verification stage produces a binary decision for each hypothesis (`Vulnerable` or `Not Vulnerable`), with supporting evidence, considered defenses, and any unresolved proof gaps recorded in the output.
 
+## How OCEAN works
+
+```text
+C/C++ source file
+    |
+    |  Lightweight tree-sitter analysis (ocean/sast_backend.py)
+    v
+Source-specific evidence paths
+    |  source identity, call-site sequence, value-flow/object-state facts,
+    |  guard facts, and target sensitive operation
+    v
+Evidence Path Trees (EPTs) (ocean/tpt.py)
+    |  reuse shared call-site prefixes and matching facts
+    |  retain path-to-operation target references
+    v
+Operation-Centered Evidence, OCE(o) (ocean/tpt.py, ocean/context.py)
+    |  assemble evidence branches from distinct sources at operation o
+    |  preserve each branch's source and calling sequence
+    |  include relevant function bodies
+    v
+Stage 1: Vulnerability hypothesis generation (ocean/stages.py)
+    |  proposed mechanism, operation, root cause, and preconditions
+    v
+Hypothesis-Specific Evidence (HSE) (ocean/evidence.py,
+    |                              ocean/vec_retrieval.py, ocean/stages.py)
+    |  select mechanism-relevant conditions, bounds, and state updates
+    |  incorporate possible counter-evidence and defenses
+    v
+Stage 2: Hypothesis review (ocean/stages.py, ocean/prompts.py)
+    |  assess triggering conditions and effectiveness of defenses
+    |  optionally retrieve missing definitions and review once more
+    v
+Finding aggregation (ocean/stages.py)
+    |
+    +--> Per-file JSON findings
+    +--> Separate diagnostic JSON (tasks, rejections, evidence gaps)
 ```
-source file
-   │  tree-sitter static analysis (ocean/sast_backend.py)
-   ▼
-exact source→sink paths ──► prefix-sharing evidence trees (ocean/tpt.py)
-   │  alias spellings of one source origin share ONE identity/tree;
-   │  same-origin peers reaching the same sink merge into one subpath
-   ▼
-operation-centered multi-source tasks (ocean/tpt.py, ocean/budget.py)
-   │  + deterministic evidence attached as shadow fields (ocean/evidence.py):
-   │    entity conditions, allocation/capacity index, carrier extent,
-   │    VEC counter-evidence (ocean/vec_retrieval.py)
-   ▼
-Stage 1 — screening, high recall (ocean/stages.py, prompts in ocean/prompts.py)
-   ▼  root-cause hypotheses
-Stage 2 — adversarial verification (attacker/defender rubric per CWE family,
-   │       bounded proof-gap completion, same model)
-   ▼
-aggregation by causal fingerprint (ocean/stages.py) ──► per-file JSON findings
-```
 
-Module map (`ocean/` package):
+### Source-guided path construction
 
-| Module | Contents |
+OCEAN uses a tree-sitter-based static backend to identify sources, value-flow and object-state facts, guard conditions, and sensitive operations. It connects these facts into source-specific evidence paths, retaining concrete call-site sequences where calls can be resolved. The analysis is intentionally lightweight and does **not** guarantee complete path or pointer analysis.
+
+### Operation-centered evidence composition
+
+For each source, OCEAN builds an **Evidence Path Tree (EPT)** to reuse overlapping call-site prefixes and matching facts. Target references preserve the associations between shared facts, individual evidence paths, and the sensitive operations they reach. OCEAN then assembles source-specific branches targeting the same concrete operation into **Operation-Centered Evidence (OCE)**, along with relevant function bodies. Branches remain distinguishable by their source identities and call-site sequences rather than being treated as one proven feasible execution path.
+
+### Hypothesis-specific evidence refinement and review
+
+For each generated hypothesis, OCEAN constructs **Hypothesis-Specific Evidence (HSE)** by selecting relevant program constraints, guards, allocation/capacity facts, and object-state updates according to the hypothesized vulnerability mechanism. Candidate facts can be collected deterministically before review; their relevance is determined for the individual hypothesis. The reviewer checks both the proposed triggering conditions and the effectiveness of possible defenses. If critical definitions are missing, bounded proof-gap completion can retrieve additional locally available functions or macros and trigger one further review.
+
+## Repository layout
+
+| Module | Responsibility |
 |---|---|
-| `config.py` | All configuration (env-driven), LLM client construction |
-| `schemas.py` | Pydantic output models, parser/structured-output builders |
-| `structures.py` | Internal dataclasses (tasks, subpaths, tree nodes) |
-| `textutil.py` | Generic text/JSON/normalization helpers |
-| `engine.py` | `StaticAnalysisEngine` facade over the tree-sitter backend |
-| `tpt.py` | Evidence-tree construction, source grouping, task packing |
-| `context.py` | Code-context construction and caching |
-| `evidence.py` | Deterministic evidence: entity conditions, carrier extent, lifetime links, VEC attach |
-| `prompts.py` | Screening/verification prompt builders and rubric blocks |
-| `budget.py` | Prompt-budget degradation and task splitting |
-| `stages.py` | Screening/verification invocation, proof-gap completion, aggregation |
-| `pipeline.py` | End-to-end per-file pipeline and the main loop |
-| `sast_backend.py` | tree-sitter static analysis backend (no LLM) |
-| `vec_retrieval.py` | Deterministic counter-evidence retrieval (no LLM) |
+| `ocean/config.py` | Configuration, environment variables, and LLM client setup |
+| `ocean/schemas.py` | Structured-output models and parsing |
+| `ocean/structures.py` | Internal task, evidence-path, and tree data structures |
+| `ocean/textutil.py` | Text, JSON, and normalization utilities |
+| `ocean/engine.py` | `StaticAnalysisEngine` facade |
+| `ocean/sast_backend.py` | Tree-sitter static analysis backend (no LLM calls) |
+| `ocean/tpt.py` | EPT construction, source grouping, and operation-centered assembly |
+| `ocean/context.py` | Function-body context construction and caching |
+| `ocean/evidence.py` | Deterministic candidate evidence: conditions, capacities, carrier extents, and lifetime-related facts |
+| `ocean/vec_retrieval.py` | Deterministic retrieval of potential counter-evidence |
+| `ocean/budget.py` | Prompt budgeting, context fallback, and task splitting |
+| `ocean/prompts.py` | Hypothesis-generation and review prompts, including vulnerability-mechanism rubrics |
+| `ocean/stages.py` | LLM stages, evidence-gap completion, and finding aggregation |
+| `ocean/pipeline.py` | End-to-end per-file orchestration |
 
 ## Requirements
 
-- Python ≥ 3.10 (developed on 3.12)
-- An [Ollama](https://ollama.com) server with the detection model pulled
-  (default `gpt-oss:120b`; a single A100-80G or equivalent is enough)
-- A prebuilt tree-sitter language bundle containing the C and C++ grammars
+- Python **3.10 or newer** (developed with Python 3.12).
+- The dependencies in `requirements.txt`.
+- A compiled tree-sitter language bundle containing the C and C++ grammars.
+- An Ollama server with a supported model, or an OpenAI-compatible chat API.
 
-Python packages (see `requirements.txt`):
+The default model is `gpt-oss:120b`. Its hardware requirements depend on the model format, context length, and concurrency settings; ensure your inference server has sufficient memory.
 
-```
+```bash
 pip install -r requirements.txt
 ```
 
-### Building the tree-sitter language bundle
+### Build the tree-sitter language bundle
 
-The backend loads a combined grammar library (`my-languages.so`). If you do
-not have one:
+The backend loads a combined grammar library (`my-languages.so`). If you do not already have one, build it with the included helper:
 
 ```bash
 git clone https://github.com/tree-sitter/tree-sitter-c
@@ -78,130 +98,115 @@ python scripts/build_languages.py \
     --output my-languages.so
 ```
 
-Point OCEAN at the result with `--tree-sitter-so /path/to/my-languages.so`
-(or `export OCEAN_TREE_SITTER_SO=...`; the legacy `PCVD_TREE_SITTER_SO` is
-still accepted as a fallback).
+Pass its path with `--tree-sitter-so /path/to/my-languages.so` or set `OCEAN_TREE_SITTER_SO`. The legacy environment variable `PCVD_TREE_SITTER_SO` is also accepted as a fallback for existing installations.
 
-### Ollama server
+### Start an Ollama server
 
 ```bash
 ollama pull gpt-oss:120b
-# Recommended: enable server-side parallelism and flash attention, otherwise
-# client-side --concurrency > 1 just queues.
 OLLAMA_NUM_PARALLEL=2 OLLAMA_FLASH_ATTENTION=1 ollama serve
 ```
 
-### OpenAI-compatible backend (e.g. DeepSeek)
-
-Instead of a local Ollama server, OCEAN can run against any OpenAI-compatible
-chat API:
-
-```bash
-export DEEPSEEK_API_KEY=sk-...          # or pass --openai-api-key
-python run_detection.py \
-    --llm-backend openai \
-    --model deepseek-flash \
-    --openai-base-url https://api.deepseek.com \
-    --source-glob '/data/targets/*.c' \
-    --output-dir results \
-    --no-patch-scope --concurrency 6
-```
-
-Notes for this backend:
-
-- The API key is read from `--openai-api-key`, `VUL_OPENAI_API_KEY`, or
-  `DEEPSEEK_API_KEY` (in that order).
-- Structured output automatically switches to parser mode
-  (`VUL_STRUCTURED_OUTPUT_MODE=parser`) because third-party APIs do not
-  implement Ollama's `json_schema` mode; a tolerant local parser plus an
-  output-fixing pass provide the safety net.
-- `--concurrency` maps directly to parallel HTTP requests — no server-side
-  knob needed, but respect the provider's rate limits.
-
+Set `--concurrency 2` on the client to permit two concurrent requests. Without corresponding server-side parallelism, requests may queue instead of running simultaneously. Adjust the parallelism and context reservation to your available hardware.
 
 ## Quick start
 
+Scan C/C++ source files with OCEAN:
+
 ```bash
 python run_detection.py \
-    --source-glob '/data/src_code_rebuilt/vul_filter/*.c' \
-    --output-dir  results/vul \
-    --diff-dir    /data/diff \
-    --model       gpt-oss:120b \
+    --source-glob '/data/targets/*.c' \
+    --output-dir results/scan \
+    --model gpt-oss:120b \
     --concurrency 2
 ```
 
-Each source file produces `<output-dir>/<name>.json` (findings) and
-`<output-dir>_diag/<name>.diag.json` (task counts, screened-out tasks,
-rejected verdicts, proof gaps — the file never lands in the results dir).
-Already-processed files are skipped; pass `--force` to redo them.
+Files matching `--source-glob` are processed individually. Each source file produces a findings JSON file in the output directory and, by default, a corresponding diagnostic file in a separate `<output-dir>_diag/` directory. Existing outputs are skipped; add `--force` to rerun them.
 
-### Patch-scope mode (default on)
+### Use an OpenAI-compatible endpoint
 
-When `--diff-dir` is given and `<CVE>_diff.txt` exists for a file, only exact
-paths whose call chain passes through a patch-touched function are analyzed.
-If the diff is missing or no patched function matches, OCEAN falls back to
-full-file analysis (a file is never silently skipped). Disable with
-`--no-patch-scope`.
+OCEAN can also use an OpenAI-compatible chat endpoint instead of Ollama:
 
-## CLI reference
+```bash
+export DEEPSEEK_API_KEY='YOUR_API_KEY'
+python run_detection.py \
+    --llm-backend openai \
+    --model YOUR_PROVIDER_MODEL_ID \
+    --openai-base-url https://api.deepseek.com \
+    --source-glob '/data/targets/*.c' \
+    --output-dir results/api-scan \
+    --concurrency 6
+```
 
-| Flag | Env var | Default | Meaning |
+Replace `YOUR_PROVIDER_MODEL_ID` with an identifier supported by your endpoint. Credentials are read from `--openai-api-key`, `VUL_OPENAI_API_KEY`, or `DEEPSEEK_API_KEY`, in that order. The OpenAI-compatible backend uses parser-based structured output where the provider does not support Ollama-style JSON-schema responses. Concurrency corresponds to parallel HTTP requests and remains subject to the provider's rate limits.
+
+## Command-line options
+
+| Option | Environment variable | Default | Description |
 |---|---|---|---|
-| `--source-glob` | `VUL_SOURCE_GLOB` | — | Source files to analyze |
-| `--output-dir` | `VUL_OUTPUT_DIR` | — | Findings output directory |
-| `--diag-dir` | `VUL_DIAG_DIR` | `<output>_diag` | Diagnostics directory |
-| `--diff-dir` | `VUL_DIFF_DIR` | — | Patch diffs for patch-scope mode |
-| `--no-patch-scope` | `VUL_PATCH_SCOPE=0` | on | Analyze whole files |
-| `--model` | `VUL_MODEL` | `gpt-oss:120b` | Model for BOTH stages |
-| `--llm-backend` | `VUL_LLM_BACKEND` | `ollama` | `ollama` or `openai` (OpenAI-compatible API) |
-| `--ollama-base-url` | `VUL_OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server |
-| `--openai-base-url` | `VUL_OPENAI_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible API base URL |
-| `--openai-api-key` | `VUL_OPENAI_API_KEY` | `$DEEPSEEK_API_KEY` | API key for the openai backend |
+| `--source-glob` | `VUL_SOURCE_GLOB` | — | Source files to process |
+| `--output-dir` | `VUL_OUTPUT_DIR` | — | Directory for findings JSON |
+| `--diag-dir` | `VUL_DIAG_DIR` | `<output>_diag` | Directory for diagnostic JSON |
+| `--model` | `VUL_MODEL` | `gpt-oss:120b` | Model used for both reasoning stages |
+| `--llm-backend` | `VUL_LLM_BACKEND` | `ollama` | `ollama` or `openai` |
+| `--ollama-base-url` | `VUL_OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server endpoint |
+| `--openai-base-url` | `VUL_OPENAI_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible API endpoint |
+| `--openai-api-key` | `VUL_OPENAI_API_KEY` | `$DEEPSEEK_API_KEY` | API credential |
 | `--num-ctx` | `VUL_NUM_CTX` | `65536` | Per-request context reservation |
-| `--concurrency` | `VUL_MAX_LLM_CONCURRENCY` | `1` | Parallel LLM requests (needs server `OLLAMA_NUM_PARALLEL`) |
-| `--review-mode` | `VUL_REVIEW_MODE` | `adversarial` | `plain` = ablation A4 (no adversarial framing) |
-| `--single-stage` | `VUL_SINGLE_STAGE=1` | off | Ablation: screening-only detector |
-| `--tree-sitter-so` | `OCEAN_TREE_SITTER_SO` | (see config.py) | tree-sitter bundle path |
-| `--force` | `VUL_FORCE_REPROCESS=1` | off | Reprocess existing outputs |
-| `--no-diagnostics` | `VUL_SAVE_DIAGNOSTICS=0` | on | Skip diag JSON files |
+| `--concurrency` | `VUL_MAX_LLM_CONCURRENCY` | `1` | Maximum concurrent LLM requests |
+| `--review-mode` | `VUL_REVIEW_MODE` | `adversarial` | `plain` disables adversarial review framing |
+| `--single-stage` | `VUL_SINGLE_STAGE=1` | Off | Run hypothesis generation without the review stage |
+| `--tree-sitter-so` | `OCEAN_TREE_SITTER_SO` | See `config.py` | Path to tree-sitter grammar bundle |
+| `--force` | `VUL_FORCE_REPROCESS=1` | Off | Reprocess existing outputs |
+| `--no-diagnostics` | `VUL_SAVE_DIAGNOSTICS=0` | Diagnostics enabled | Suppress diagnostic JSON |
 
-Every other knob (prompt budgets, trace depths, evidence retrieval switches,
-fallback policy, structured-output mode, …) is an env var documented inline in
-`ocean/config.py` — look for the `VUL_*` block comments.
+Additional options for analysis depth, evidence retrieval, prompt budgets, fallback behavior, and structured output are documented in `ocean/config.py` (`VUL_*` variables).
 
-## Output format
+## Output and diagnostics
 
-Per-file JSON array; each finding carries:
+Each processed source file produces a JSON array of findings. The structured fields include:
 
-```
-is_vulnerable          "Vulnerable" | "Not Vulnerable"   (binary, never "uncertain")
-vulnerability_type     free text
-cwe_id                 e.g. "CWE-416"
-vulnerability_root_cause   violated invariant + defective operation
-vulnerable_path        attack path summary
-security_boundary / boundary_status
-counterevidence / defenses_considered / proof_gaps
-confidence             High | Medium | Low
-```
+| Field | Meaning |
+|---|---|
+| `is_vulnerable` | Binary decision: `Vulnerable` or `Not Vulnerable` |
+| `vulnerability_type`, `cwe_id` | Proposed vulnerability type and CWE |
+| `vulnerability_root_cause` | Root-cause explanation and implicated operation |
+| `vulnerable_path` | Vulnerability-related propagation or triggering path summary |
+| `security_boundary`, `boundary_status` | Evaluated security condition and its status |
+| `counterevidence`, `defenses_considered` | Potentially protective or contradictory evidence considered during review |
+| `proof_gaps` | Remaining evidence gaps or missing program definitions |
+| `confidence` | `High`, `Medium`, or `Low` |
 
-## Efficiency notes
+A binary decision does **not** imply that all program facts have been proven. Unresolved evidence may remain in `proof_gaps`. Consult the diagnostic JSON for screened-out tasks, rejected hypotheses, and other intermediate outcomes instead of treating the final findings file as a complete record of all candidates.
 
-- Throughput is dominated by LLM call count × per-call latency. The single
-  biggest lever is server-side parallelism: start ollama with
-  `OLLAMA_NUM_PARALLEL=2 OLLAMA_FLASH_ATTENTION=1` and pass `--concurrency 2`.
-- Operation-centered composition collapses redundant source paths into one
-  task per sensitive operation, which is what keeps the LLM call count
-  bounded on large files.
-- Deterministic evidence (entity conditions, VEC, carrier extent, lifetime
-  links) costs zero LLM calls.
-- Ablation switches (all default to the main configuration): `VUL_TPT_TREE`,
-  `VUL_SINGLE_STAGE`, `VUL_REVIEW_MODE`, `VUL_VEC_COUNTER_EVIDENCE`,
-  `VUL_ENTITY_CONDITIONS`, `VUL_CARRIER_EXTENT`, `VUL_LIFETIME_LINKS` (off by
-  default), `VUL_LOAD_BEARING_RULE`, `VUL_GUARDFACT_PROMPT`, and more in
-  `ocean/config.py`.
-- Batching ablations: `VUL_MULTI_SOURCE_BATCHING=off` disables operation-aware
-  multi-source grouping; target-function packing then keeps different sources
-  in separate prompt tasks while still merging path variants of the same
-  source, so only the cross-source joint context is removed. Set
-  `VUL_PATH_VARIANT_BATCHING=off` to additionally disable path-variant packing
-  itself (one prompt task per exact path).
+## Ablations and configuration switches
+
+The implementation exposes environment-variable switches for controlled comparisons. These names are retained from the codebase, including historical `TPT` and `VEC` names:
+
+| Switch | Purpose |
+|---|---|
+| `VUL_MULTI_SOURCE_BATCHING=off` | Disable operation-aware assembly across distinct sources |
+| `VUL_PATH_VARIANT_BATCHING=off` | Disable packing of same-source path variants into one task |
+| `VUL_TPT_TREE` | Enable/disable evidence-tree construction |
+| `VUL_SINGLE_STAGE` | Run without the verification stage |
+| `VUL_REVIEW_MODE` | Change the review prompt framing |
+| `VUL_VEC_COUNTER_EVIDENCE` | Toggle deterministic counter-evidence retrieval |
+| `VUL_ENTITY_CONDITIONS` | Toggle additional entity-related conditions |
+| `VUL_CARRIER_EXTENT` | Toggle carrier-length and capacity evidence |
+| `VUL_LIFETIME_LINKS` | Toggle additional lifetime-link evidence (off by default) |
+| `VUL_LOAD_BEARING_RULE` | Toggle the corresponding review rule |
+| `VUL_GUARDFACT_PROMPT` | Toggle the corresponding guard-fact prompt features |
+
+Disabling cross-source batching **does not** necessarily disable same-source path sharing or other HSE components. To reproduce a paper ablation, match **all** relevant switches, prompts, model settings, and input conditions to that experiment. Refer to `ocean/config.py` for supported values and defaults.
+
+## Efficiency and scope
+
+- Runtime is generally dominated by LLM inference. Static extraction and candidate-evidence retrieval do not require additional LLM calls, although they can affect prompt size.
+- EPT prefix sharing and operation-centered assembly reduce repeated presentation of overlapping evidence. Actual request counts depend on task splitting, evidence budgets, and the number of proposed hypotheses.
+- Prompt-budget limits and fallback behavior are configured in `ocean/config.py`.
+- OCEAN performs lightweight source-level analysis rather than sound, complete interprocedural verification. In particular, unresolved indirect calls, complex aliasing, and dependencies outside the analyzed source file can leave relevant evidence unavailable.
+- Findings remain subject to verification. Treat them as vulnerability reports requiring appropriate triage and responsible disclosure, not as automatically proven exploits.
+
+## Evaluation context
+
+The accompanying research evaluates OCEAN on **InterPVD (497 vulnerable–patched pairs)**, **ReposVul (996 pairs)**, and a collection of **2025–2026 CVEs (189 pairs)**, spanning eight target CWE categories. Its real-world study reports 15 previously unknown vulnerabilities across ten open-source projects, including nine subsequently fixed and three additionally confirmed by maintainers at the time of writing. These results describe the reported evaluation and do not substitute for validating a new deployment or configuration.
